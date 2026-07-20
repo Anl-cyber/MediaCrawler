@@ -81,7 +81,7 @@ def _pulse_heartbeat(status_path, item_type: str, platform: str) -> None:
                 st["comments_done"] = st.get("comments_done", 0) + 1
             else:
                 st["notes_done"] = st.get("notes_done", 0) + 1
-            if st.get("state") in (None, "", "done", "error"):
+            if st.get("state") in (None, ""):
                 st["state"] = "running"
             st["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
             data = dict(st)
@@ -96,6 +96,9 @@ class AsyncFileWriter:
         self.platform = platform
         self.crawler_type = crawler_type
         self.wordcloud_generator = AsyncWordCloudGenerator() if config.ENABLE_GET_WORDCLOUD else None
+        # 心跳状态路径在 writer 构造时即捕获，避免并发时共享全局
+        # config.CRAWL_STATUS_PATH 被其他任务覆盖导致心跳写错文件。
+        self.status_path = getattr(config, "CRAWL_STATUS_PATH", None)
 
     def _get_file_path(self, file_type: str, item_type: str) -> str:
         if config.SAVE_DATA_PATH:
@@ -116,8 +119,10 @@ class AsyncFileWriter:
                     await writer.writeheader()
                 await writer.writerow(item)
             # ── SocialSense 心跳钩子：每存一条回传进度/存活 ──
-            _pulse_heartbeat(getattr(config, "CRAWL_STATUS_PATH", None),
-                             item_type, self.platform)
+            _pulse_heartbeat(
+                self.status_path if self.status_path
+                else getattr(config, "CRAWL_STATUS_PATH", None),
+                item_type, self.platform)
 
     async def write_to_jsonl(self, item: Dict, item_type: str):
         file_path = self._get_file_path('jsonl', item_type)
