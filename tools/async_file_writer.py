@@ -27,6 +27,69 @@ import config
 from tools.utils import utils
 from tools.words import AsyncWordCloudGenerator
 
+# ── SocialSense 实时心跳/状态回传（我们维护的扩展，非上游代码） ──
+import time
+import threading
+
+_heartbeat_lock = threading.Lock()
+_heartbeat_state = {}  # status_path -> {notes_done, comments_done, ...}
+
+
+def _write_status_atomic(path: str, data: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+    os.replace(tmp, path)
+
+
+def _pulse_heartbeat(status_path, item_type: str, platform: str) -> None:
+    """每条数据落库时调用：累积计数 + 刷新心跳时间戳，写入状态文件。
+
+    状态文件路径由 SocialSense 封装层通过 config.CRAWL_STATUS_PATH 注入；
+    文件含 state/platform/keyword/notes_done/comments_done/last_heartbeat，
+    后端轮询该文件即可实时掌握爬虫在线状态与进度。
+    """
+    if not status_path:
+        return
+    try:
+        with _heartbeat_lock:
+            st = _heartbeat_state.get(status_path)
+            if st is None:
+                st = {
+                    "state": "running",
+                    "platform": platform,
+                    "keyword": "",
+                    "notes_done": 0,
+                    "comments_done": 0,
+                    "started_at": "",
+                    "finished_at": "",
+                    "error": "",
+                }
+                # 继承封装层写入的 keyword/started_at 等字段
+                try:
+                    if os.path.exists(status_path):
+                        with open(status_path, encoding="utf-8") as f:
+                            old = json.load(f)
+                        for k in ("keyword", "started_at", "platform", "state"):
+                            if old.get(k):
+                                st[k] = old[k]
+                except Exception:
+                    pass
+                _heartbeat_state[status_path] = st
+            if item_type == "comments":
+                st["comments_done"] = st.get("comments_done", 0) + 1
+            else:
+                st["notes_done"] = st.get("notes_done", 0) + 1
+            if st.get("state") in (None, "", "done", "error"):
+                st["state"] = "running"
+            st["last_heartbeat"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            data = dict(st)
+        _write_status_atomic(status_path, data)
+    except Exception:
+        pass
+
+
 class AsyncFileWriter:
     def __init__(self, platform: str, crawler_type: str):
         self.lock = asyncio.Lock()
@@ -52,6 +115,9 @@ class AsyncFileWriter:
                 if not file_exists or await f.tell() == 0:
                     await writer.writeheader()
                 await writer.writerow(item)
+            # ── SocialSense 心跳钩子：每存一条回传进度/存活 ──
+            _pulse_heartbeat(getattr(config, "CRAWL_STATUS_PATH", None),
+                             item_type, self.platform)
 
     async def write_to_jsonl(self, item: Dict, item_type: str):
         file_path = self._get_file_path('jsonl', item_type)
