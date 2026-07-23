@@ -36,26 +36,50 @@ import cmd_arg
 import config
 from database import db
 from base.base_crawler import AbstractCrawler
-from media_platform.bilibili import BilibiliCrawler
-from media_platform.douyin import DouYinCrawler
-from media_platform.kuaishou import KuaishouCrawler
-from media_platform.tieba import TieBaCrawler
-from media_platform.weibo import WeiboCrawler
-from media_platform.xhs import XiaoHongShuCrawler
-from media_platform.zhihu import ZhihuCrawler
+# 平台模块懒加载——model.m_* 可能缺失，单平台采集不应因另一平台炸掉
+try:
+    from media_platform.bilibili import BilibiliCrawler
+except ImportError:
+    BilibiliCrawler = None
+try:
+    from media_platform.douyin import DouYinCrawler
+except ImportError:
+    DouYinCrawler = None
+try:
+    from media_platform.kuaishou import KuaishouCrawler
+except ImportError:
+    KuaishouCrawler = None
+try:
+    from media_platform.tieba import TieBaCrawler
+except ImportError:
+    TieBaCrawler = None
+try:
+    from media_platform.weibo import WeiboCrawler
+except ImportError:
+    WeiboCrawler = None
+try:
+    from media_platform.xhs import XiaoHongShuCrawler
+except ImportError:
+    XiaoHongShuCrawler = None
+try:
+    from media_platform.zhihu import ZhihuCrawler
+except ImportError:
+    ZhihuCrawler = None
 from tools.async_file_writer import AsyncFileWriter
 from var import crawler_type_var
 
 
 class CrawlerFactory:
     CRAWLERS: dict[str, Type[AbstractCrawler]] = {
-        "xhs": XiaoHongShuCrawler,
-        "dy": DouYinCrawler,
-        "ks": KuaishouCrawler,
-        "bili": BilibiliCrawler,
-        "wb": WeiboCrawler,
-        "tieba": TieBaCrawler,
-        "zhihu": ZhihuCrawler,
+        k: v for k, v in {
+            "xhs": XiaoHongShuCrawler,
+            "dy": DouYinCrawler,
+            "ks": KuaishouCrawler,
+            "bili": BilibiliCrawler,
+            "wb": WeiboCrawler,
+            "tieba": TieBaCrawler,
+            "zhihu": ZhihuCrawler,
+        }.items() if v is not None
     }
 
     @staticmethod
