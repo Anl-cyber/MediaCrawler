@@ -36,35 +36,23 @@ import cmd_arg
 import config
 from database import db
 from base.base_crawler import AbstractCrawler
-# 平台模块懒加载——model.m_* 可能缺失，单平台采集不应因另一平台炸掉
-try:
-    from media_platform.bilibili import BilibiliCrawler
-except ImportError:
-    BilibiliCrawler = None
-try:
-    from media_platform.douyin import DouYinCrawler
-except ImportError:
-    DouYinCrawler = None
-try:
-    from media_platform.kuaishou import KuaishouCrawler
-except ImportError:
-    KuaishouCrawler = None
-try:
-    from media_platform.tieba import TieBaCrawler
-except ImportError:
-    TieBaCrawler = None
-try:
-    from media_platform.weibo import WeiboCrawler
-except ImportError:
-    WeiboCrawler = None
-try:
-    from media_platform.xhs import XiaoHongShuCrawler
-except ImportError:
-    XiaoHongShuCrawler = None
-try:
-    from media_platform.zhihu import ZhihuCrawler
-except ImportError:
-    ZhihuCrawler = None
+# 平台模块懒加载——缺 model/libs 等文件时仅跳过该平台，不崩其他平台
+def _try_import(module_path: str):
+    try:
+        import importlib
+        m = importlib.import_module(module_path)
+        cls_name = module_path.rsplit('.', 1)[-1].capitalize() + 'Crawler'
+        return getattr(m, cls_name)
+    except Exception:
+        return None
+
+BilibiliCrawler = _try_import("media_platform.bilibili")
+DouYinCrawler = _try_import("media_platform.douyin")
+KuaishouCrawler = _try_import("media_platform.kuaishou")
+TieBaCrawler = _try_import("media_platform.tieba")
+WeiboCrawler = _try_import("media_platform.weibo")
+XiaoHongShuCrawler = _try_import("media_platform.xhs")
+ZhihuCrawler = _try_import("media_platform.zhihu")
 from tools.async_file_writer import AsyncFileWriter
 from var import crawler_type_var
 
