@@ -36,7 +36,7 @@ from tools import utils
 from .field import SearchNoteType, SearchSortType
 from .help import TieBaExtractor
 
-PC_SIGN_SECRET = "36770b1f34c9bbf2e7d1a99d2b82fa9e"
+PC_SIGN_SECRET = os.getenv("TIEBA_SIGN_SECRET", "")
 
 
 class BaiduTieBaClient(AbstractApiClient):
