@@ -48,6 +48,11 @@ def _try_import(module_path: str):
 
 BilibiliCrawler = _try_import("media_platform.bilibili")
 DouYinCrawler = _try_import("media_platform.douyin")
+if DouYinCrawler is None:
+    try:
+        from media_platform.douyin import DouYinCrawler
+    except Exception:
+        pass
 KuaishouCrawler = _try_import("media_platform.kuaishou")
 TieBaCrawler = _try_import("media_platform.tieba")
 WeiboCrawler = _try_import("media_platform.weibo")

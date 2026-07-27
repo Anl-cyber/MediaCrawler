@@ -66,6 +66,41 @@ class DouYinCrawler(AbstractCrawler):
 
     async def start(self) -> None:
         playwright_proxy_format, httpx_proxy_format = None, None
+
+        # 使用已有 Profile 目录（含 localStorage + cookies）
+        import os as _os
+        profile_dir = _os.environ.get("DOUYIN_PROFILE_DIR", "")
+        if profile_dir and _os.path.isdir(profile_dir):
+            utils.logger.info(f"[DouYinCrawler] 使用浏览器 Profile: {profile_dir}")
+            async with async_playwright() as playwright:
+                self.browser_context = await playwright.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=config.HEADLESS,
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-features=IsolateOrigins,site-per-process",
+                    ],
+                )
+                self.browser_context.add_init_script(path="libs/stealth.min.js")
+                self.context_page = self.browser_context.pages[0] if self.browser_context.pages else await self.browser_context.new_page()
+                if not self.context_page.url.startswith("http"):
+                    await self.context_page.goto(self.index_url)
+                self.dy_client = await self.create_douyin_client(httpx_proxy_format)
+                if not await self.dy_client.pong(browser_context=self.browser_context):
+                    raise DataFetchError("Profile 登录态已过期，请重新扫码登录")
+                crawler_type_var.set(config.CRAWLER_TYPE)
+                if config.CRAWLER_TYPE == "search":
+                    await self.search()
+                elif config.CRAWLER_TYPE == "detail":
+                    await self.get_specified_awemes()
+                elif config.CRAWLER_TYPE == "creator":
+                    await self.get_creators_and_videos()
+                utils.logger.info("[DouYinCrawler.start] Douyin Crawler finished ...")
+                return
+
+        # 无 Profile → 正常浏览器 + 登录流程
         if config.ENABLE_IP_PROXY:
             self.ip_proxy_pool = await create_ip_pool(config.IP_PROXY_POOL_COUNT, enable_validate_ip=True)
             ip_proxy_info: IpInfoModel = await self.ip_proxy_pool.get_proxy()
@@ -101,7 +136,7 @@ class DouYinCrawler(AbstractCrawler):
             if not await self.dy_client.pong(browser_context=self.browser_context):
                 login_obj = DouYinLogin(
                     login_type=config.LOGIN_TYPE,
-                    login_phone="",  # you phone number
+                    login_phone="",
                     browser_context=self.browser_context,
                     context_page=self.context_page,
                     cookie_str=config.COOKIES,

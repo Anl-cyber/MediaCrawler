@@ -51,23 +51,20 @@ class DouYinLogin(AbstractLogin):
         self.cookie_str = cookie_str
 
     async def begin(self):
-        """
-            Start login douyin website
-            The verification accuracy of the slider verification is not very good... If there are no special requirements, it is recommended not to use Douyin login, or use cookie login
-        """
-
-        # popup login dialog
-        await self.popup_login_dialog()
+        """Start login. Cookie 登录跳过弹窗，直接注入。"""
 
         # select login type
-        if config.LOGIN_TYPE == "qrcode":
-            await self.login_by_qrcode()
-        elif config.LOGIN_TYPE == "phone":
-            await self.login_by_mobile()
-        elif config.LOGIN_TYPE == "cookie":
+        if config.LOGIN_TYPE == "cookie":
             await self.login_by_cookies()
         else:
-            raise ValueError("[DouYinLogin.begin] Invalid Login Type Currently only supported qrcode or phone or cookie ...")
+            # popup login dialog (only for qrcode/phone)
+            await self.popup_login_dialog()
+            if config.LOGIN_TYPE == "qrcode":
+                await self.login_by_qrcode()
+            elif config.LOGIN_TYPE == "phone":
+                await self.login_by_mobile()
+            else:
+                raise ValueError("[DouYinLogin.begin] Invalid Login Type")
 
         # If the page redirects to the slider verification page, need to slide again
         await asyncio.sleep(6)
@@ -264,11 +261,32 @@ class DouYinLogin(AbstractLogin):
         await self.context_page.mouse.up()
 
     async def login_by_cookies(self):
+        """直接注入 Playwright 格式的 cookie JSON，只过滤 douyin 相关域名"""
         utils.logger.info("[DouYinLogin.login_by_cookies] Begin login douyin by cookie ...")
+        import json
+        try:
+            cookie_list = json.loads(self.cookie_str) if isinstance(self.cookie_str, str) else self.cookie_str
+            if isinstance(cookie_list, list):
+                dy_cookies = [
+                    c for c in cookie_list
+                    if c.get('name') and c.get('value') is not None
+                    and ('douyin.com' in str(c.get('domain', '')))
+                    and c.get('expires', 0) != -1  # Playwright rejects expires=-1
+                ]
+                for c in dy_cookies:
+                    await self.browser_context.add_cookies([{
+                        'name': c['name'],
+                        'value': str(c['value']),
+                        'domain': c.get('domain', '.douyin.com'),
+                        'path': c.get('path', '/'),
+                    }])
+                utils.logger.info(f"[DouYinLogin.login_by_cookies] 注入 {len(dy_cookies)} 个 douyin cookies (from {len(cookie_list)} total)")
+                return
+        except (json.JSONDecodeError, TypeError):
+            pass
+        # 回退：name=value 字符串
         for key, value in utils.convert_str_cookie_to_dict(self.cookie_str).items():
             await self.browser_context.add_cookies([{
-                'name': key,
-                'value': value,
-                'domain': ".douyin.com",
-                'path': "/"
+                'name': key, 'value': value,
+                'domain': ".douyin.com", 'path': "/"
             }])

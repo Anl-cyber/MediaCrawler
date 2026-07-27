@@ -515,7 +515,7 @@ class BilibiliCrawler(AbstractCrawler):
                     "height": 1080
                 },
                 user_agent=user_agent,
-                channel="chrome",  # Use system's stable Chrome version
+                channel=None,  # 使用 Playwright 内置 Chromium（兼容性更好）
             )
             return browser_context
         else:
