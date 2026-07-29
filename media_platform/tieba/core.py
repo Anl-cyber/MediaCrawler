@@ -54,7 +54,8 @@ class TieBaCrawler(AbstractCrawler):
 
     def __init__(self) -> None:
         self.index_url = "https://tieba.baidu.com"
-        self.cookie_urls = [self.index_url]
+        # 包含所有相关域名，确保 STOKEN/PTOKEN/BDUSS 不被域过滤排除
+        self.cookie_urls = [self.index_url, "https://baidu.com", "https://passport.baidu.com"]
         self.user_agent = utils.get_user_agent()
         self._page_extractor = TieBaExtractor()
         self.cdp_manager = None
