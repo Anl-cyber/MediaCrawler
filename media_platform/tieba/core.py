@@ -415,7 +415,7 @@ class TieBaCrawler(AbstractCrawler):
         try:
             # Step 1: Visit Baidu homepage
             utils.logger.info("[TieBaCrawler] Step 1: Visiting Baidu homepage https://www.baidu.com/")
-            await self.context_page.goto("https://www.baidu.com/", wait_until="domcontentloaded")
+            await self.context_page.goto("https://www.baidu.com/", wait_until="domcontentloaded", timeout=30000)
 
             # Step 2: Wait for page loading, using delay setting from config file
             utils.logger.info(f"[TieBaCrawler] Step 2: Waiting {config.CRAWLER_MAX_SLEEP_SEC} seconds to simulate user browsing...")
