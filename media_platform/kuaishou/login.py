@@ -70,6 +70,13 @@ class KuaishouLogin(AbstractLogin):
         kuaishou_pass_token = cookie_dict.get("passToken")
         if kuaishou_pass_token:
             return True
+        # passToken is in localStorage, not cookies — check there too
+        try:
+            ls_token = await self.context_page.evaluate("() => localStorage.getItem('passToken')")
+            if ls_token:
+                return True
+        except Exception:
+            pass
         return False
 
     async def login_by_qrcode(self):
@@ -120,3 +127,14 @@ class KuaishouLogin(AbstractLogin):
                 'domain': ".kuaishou.com",
                 'path': "/"
             }])
+        # After setting cookies, navigate to homepage to trigger passToken generation in localStorage
+        try:
+            await self.context_page.goto("https://www.kuaishou.com", wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)  # wait for kuaishou JS to initialize session
+            pt = await self.context_page.evaluate("() => localStorage.getItem('passToken')")
+            if pt:
+                utils.logger.info(f"[KuaishouLogin.login_by_cookies] passToken obtained from localStorage")
+            else:
+                utils.logger.warning("[KuaishouLogin.login_by_cookies] passToken still empty after reload")
+        except Exception as e:
+            utils.logger.error(f"[KuaishouLogin.login_by_cookies] Failed to refresh page for passToken: {e}")

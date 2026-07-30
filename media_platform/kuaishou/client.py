@@ -60,10 +60,27 @@ class KuaiShouClient(AbstractApiClient, ProxyRefreshMixin):
         self.playwright_page = playwright_page
         self.cookie_dict = cookie_dict
         self.graphql = KuaiShouGraphQL()
+        self._pass_token = None  # lazy-load from localStorage
         # Initialize proxy pool (from ProxyRefreshMixin)
         self.init_proxy_pool(proxy_ip_pool)
 
+    async def _ensure_auth_headers(self) -> None:
+        """Inject passToken from localStorage into headers (GraphQL requires it)."""
+        if self._pass_token is not None:
+            return
+        try:
+            page = self.playwright_page
+            if page:
+                self._pass_token = await page.evaluate("() => localStorage.getItem('passToken')") or ""
+                if self._pass_token:
+                    # kuaishou GraphQL uses X-Ks-Cp header for auth
+                    self.headers["X-Ks-Cp"] = self._pass_token
+        except Exception:
+            self._pass_token = ""
+
     async def request(self, method, url, **kwargs) -> Any:
+        # Ensure passToken header is set before first request
+        await self._ensure_auth_headers()
         # Check if proxy is expired before each request
         await self._refresh_proxy_if_expired()
 
