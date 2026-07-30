@@ -47,9 +47,12 @@ def _patch_xhshow_a3_hash():
 
     _original_build = CryptoProcessor.build_payload_array
 
-    def _patched_build(self, hex_parameter, a1_value, app_identifier="xhs-pc-web",
+    def _patched_build(self, hex_parameter, hex_md5_path="", a1_value="", app_identifier="xhs-pc-web",
                        string_param="", timestamp=None, sign_state=None):
-        payload = _original_build(self, hex_parameter, a1_value, app_identifier,
+        # 兜底: xhshow 要求 hex_md5_path 是 32-char hex, 空串会导致 int('',16) 崩溃
+        if not hex_md5_path or len(hex_md5_path) < 32:
+            hex_md5_path = "0" * 32
+        payload = _original_build(self, hex_parameter, hex_md5_path, a1_value, app_identifier,
                                   string_param, timestamp, sign_state)
         # 仅当 content_string 不含 "{" 时修复 (即 GET 请求)
         if "{" not in string_param:
@@ -145,11 +148,20 @@ def sign_with_xhshow(
         cookie_dict = xhshow_client._parse_cookies(cookie_str)
         a1_value = cookie_dict.get("a1", "")
 
+        # xhshow 库要求 a1 是纯 hex 字符串(32 chars), 但新版小红书 a1 可能含非 hex 字符。
+        # 全量验证 hex 合法性，不通过则置空。
+        try:
+            int(a1_value, 16)  # full hex check
+        except (ValueError, IndexError):
+            a1_value = ""
+
         ts = time.time()
         d_value = hashlib.md5(content_string.encode("utf-8")).hexdigest()
 
         payload_array = xhshow_client.crypto_processor.build_payload_array(
-            d_value, a1_value, "xhs-pc-web", content_string, ts
+            d_value, a1_value, "xhs-pc-web",
+            string_param=content_string,
+            timestamp=ts
         )
         xor_result = xhshow_client.crypto_processor.bit_ops.xor_transform_array(payload_array)
         config = xhshow_client.config
