@@ -247,6 +247,11 @@ class ZhihuExtractor:
         res.dislike_count = comment.get("dislike_count") if comment.get("dislike_count") else 0
         res.content_id = page_content.content_id
         res.content_type = page_content.content_type
+        # IP 属地：优先 address_text，降级 comment_tags[ip_info]
+        addr = comment.get("address_text", "")
+        if not addr:
+            addr = self._extract_comment_ip_location(comment.get("comment_tags", []))
+        res.ip_location = str(addr).replace("IP 属地", "").replace(":", "").strip()
 
         # extract author info
         author_info = self._extract_content_or_comment_author(comment.get("author"))

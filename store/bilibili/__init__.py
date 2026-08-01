@@ -110,6 +110,7 @@ async def update_bilibili_video_comment(video_id: str, comment_item: Dict):
         "nickname": mask_nickname(user_info.get("uname")),  # 用户昵称(已脱敏)
         "sub_comment_count": str(comment_item.get("rcount", 0)),
         "like_count": like_count,
+        "ip_location": (comment_item.get("reply_control") or {}).get("location", "").replace("IP属地:", ""),  # IP 属地: 广东
         "last_modify_ts": utils.get_current_timestamp(),
     }
     utils.logger.info(f"[store.bilibili.update_bilibili_video_comment] Bilibili video comment: {comment_id}, content: {save_comment_item.get('content')}")

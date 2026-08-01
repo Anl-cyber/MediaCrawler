@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 # Copyright (c) 2025 relakkes@gmail.com
-#
-# This file is part of MediaCrawler project.
-# Repository: https://github.com/NanmiCoder/MediaCrawler/blob/main/media_platform/tieba/client.py
+import os
+# MediaCrawler project
 # GitHub: https://github.com/NanmiCoder
 # Licensed under NON-COMMERCIAL LEARNING LICENSE 1.1
 #
@@ -19,7 +18,9 @@
 
 import asyncio
 import hashlib
+import html
 import json
+import re
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import urlencode, quote, parse_qs, unquote, urlparse
 
@@ -32,6 +33,7 @@ from base.base_crawler import AbstractApiClient
 from model.m_baidu_tieba import TiebaComment, TiebaCreator, TiebaNote
 from proxy.proxy_ip_pool import ProxyIpPool
 from tools import utils
+from tools.user_hash import anonymize_user_id
 
 from .field import SearchNoteType, SearchSortType
 from .help import TieBaExtractor
@@ -99,7 +101,30 @@ class BaiduTieBaClient(AbstractApiClient):
             sign_source = data if method.upper() == "POST" else params
             sign_source.setdefault("subapp_type", "pc")
             sign_source.setdefault("_client_type", "20")
-            sign_source["sign"] = self._sign_pc_params(sign_source)
+            # 尝试从浏览器页面提取签名密钥，否则回退到 Python 计算
+            try:
+                sign_secret = await self.playwright_page.evaluate(
+                    """() => {
+                        return window.__TIEBA_SIGN_SECRET__ || 
+                               window.PageData?.sign_secret || 
+                               window._sign_secret || "";
+                    }"""
+                )
+            except Exception:
+                sign_secret = ""
+            
+            if sign_secret:
+                import hashlib as _hl
+                sign_text = ""
+                for key in sorted(sign_source):
+                    if key in {"sign", "sig"} or sign_source[key] is None:
+                        continue
+                    sign_text += f"{key}={sign_source[key]}"
+                sign_text += sign_secret
+                sign_source["sign"] = _hl.md5(sign_text.encode("utf-8")).hexdigest()
+            else:
+                # 回退到 Python 计算（PC_SIGN_SECRET 为空时 sign 无效，但请求仍发出去）
+                sign_source["sign"] = self._sign_pc_params(sign_source)
 
         url = f"{self._host}{uri}"
         if params:
@@ -133,11 +158,20 @@ class BaiduTieBaClient(AbstractApiClient):
     async def _get_pc_tbs(self) -> str:
         if self._pc_tbs:
             return self._pc_tbs
-        sync_data = await self._fetch_json_by_browser(
-            "/c/s/pc/sync",
-            params={"subapp_type": "pc", "_client_type": "20"},
-            use_sign=True,
-        )
+        # 先尝试无签名请求（手机版 API 不需要 PC 签名）
+        try:
+            sync_data = await self._fetch_json_by_browser(
+                "/c/s/pc/sync",
+                params={"subapp_type": "pc", "_client_type": "20"},
+                use_sign=False,  # 无签名试一次
+            )
+        except Exception:
+            # 回退：带签名再试
+            sync_data = await self._fetch_json_by_browser(
+                "/c/s/pc/sync",
+                params={"subapp_type": "pc", "_client_type": "20"},
+                use_sign=True,
+            )
         self._pc_tbs = (
             sync_data.get("data", {})
             .get("anti", {})
@@ -146,27 +180,6 @@ class BaiduTieBaClient(AbstractApiClient):
         if not self._pc_tbs:
             raise Exception(f"Can not get Tieba tbs from pc sync API: {sync_data}")
         return self._pc_tbs
-
-    async def _get_pc_page_data(self, note_id: str, page: int = 1) -> Dict:
-        tbs = await self._get_pc_tbs()
-        return await self._fetch_json_by_browser(
-            "/c/f/pb/page_pc",
-            method="POST",
-            data={
-                "pn": page,
-                "lz": 0,
-                "r": 2,
-                "mark_type": 0,
-                "back": 0,
-                "fr": "",
-                "kz": note_id,
-                "session_request_times": 1,
-                "tbs": tbs,
-                "subapp_type": "pc",
-                "_client_type": "20",
-            },
-            use_sign=True,
-        )
 
     @staticmethod
     def _extract_creator_portrait(creator_url: str) -> str:
@@ -427,7 +440,13 @@ class BaiduTieBaClient(AbstractApiClient):
 
     async def get_note_by_id(self, note_id: str) -> TiebaNote:
         """
-        Get post details by post ID (uses Playwright to access page, avoiding API detection)
+        Get post details by post ID (uses browser navigation).
+
+        The legacy PC JSON API chain (/c/s/pc/sync -> /c/f/pb/page_pc) requires a
+        `sign` secret that is no longer shipped in the current tieba web frontend
+        (verified 2026-07: no-sign / garbage-sign / mobile-secret all return
+        error_code=110001). Browser navigation + in-page JS/DOM extraction is the
+        only reliable path and avoids the dead API round-trips.
         Args:
             note_id: Post ID
 
@@ -438,16 +457,299 @@ class BaiduTieBaClient(AbstractApiClient):
             utils.logger.error("[BaiduTieBaClient.get_note_by_id] playwright_page is None, cannot use browser mode")
             raise Exception("playwright_page is required for browser-based note detail fetching")
 
-        utils.logger.info(f"[BaiduTieBaClient.get_note_by_id] Accessing post detail API, note_id: {note_id}")
+        utils.logger.info(f"[BaiduTieBaClient.get_note_by_id] Browser fetching post page, note_id: {note_id}")
 
         try:
-            api_data = await self._get_pc_page_data(note_id=note_id, page=1)
-            note_detail = self._page_extractor.extract_note_detail_from_api(api_data)
+            post_url = f"{self._host}/p/{note_id}"
+            await self.playwright_page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2)
+            page_html = await self.playwright_page.content()
+
+            # Detect captcha page and retry once
+            if "百度安全验证" in page_html or "captcha" in page_html.lower():
+                utils.logger.warning(f"[BaiduTieBaClient.get_note_by_id] Captcha page detected for note {note_id}, waiting 10s and retrying...")
+                await asyncio.sleep(10)
+                await self.playwright_page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(3)
+                page_html = await self.playwright_page.content()
+
+            # Extract from page's embedded JS data first, fallback to DOM selectors
+            note_detail = await self._extract_note_from_page(note_id, page_html)
             return note_detail
 
         except Exception as e:
             utils.logger.error(f"[BaiduTieBaClient.get_note_by_id] Failed to get post details: {e}")
             raise
+
+    async def _extract_note_from_page(self, note_id: str, page_html: str):
+        """Extract note detail from page HTML and embedded JS data."""
+        
+        # Comprehensive JS data extraction from page context
+        js_data = await self.playwright_page.evaluate("""() => {
+            const dom = {};
+            
+            // Title from h1 or title tag
+            const titleEl = document.querySelector('h1[class*="title"], .core_title_txt, title');
+            if (titleEl) dom.title = (titleEl.textContent || '').trim();
+            
+            // First post - get ALL data-field elements, pick first one
+            const postDivs = document.querySelectorAll('[data-field]');
+            let firstPostDiv = null;
+            for (const div of postDivs) {
+                const field = div.getAttribute('data-field');
+                if (field) {
+                    try {
+                        const data = JSON.parse(field);
+                        if (data.content) {
+                            firstPostDiv = div;
+                            dom.first_post_data = data;
+                            // Extract author from data-field JSON
+                            const author = data.author || {};
+                            dom.author_name = author.user_name || author.name_show || author.name || '';
+                            dom.author_id = author.user_id || author.portrait || '';
+                            // Extract timestamp from data-field
+                            dom.time_unix = data.time || 0;
+                            dom.time_date = data.date || '';
+                            // Extract post content from data-field
+                            if (typeof data.content === 'string') {
+                                dom.post_text = data.content.substring(0, 3000);
+                            } else if (data.content && data.content.text) {
+                                dom.post_text = data.content.text.substring(0, 3000);
+                            }
+                            break;
+                        }
+                    } catch(e) {}
+                }
+            }
+            
+            // Fallback first post text from DOM (wider selectors that worked in v3)
+            if (!dom.post_text) {
+                const contentEls = document.querySelectorAll('.d_post_content, [class*="post_content"], [class*="content"]');
+                if (contentEls.length > 0) {
+                    // Take only first content element
+                    const clone = contentEls[0].cloneNode(true);
+                    // Remove nested reply elements
+                    clone.querySelectorAll('[class*="lzl"], [class*="comment"], [class*="reply_"]').forEach(el => el.remove());
+                    dom.first_post_text = (clone.textContent || '').trim().substring(0, 3000);
+                }
+            }
+            
+            // Forum/Ba name (wider selectors from v3 that worked)
+            const forumEl = document.querySelector('[class*="ba_name"], [class*="forum"], [class*="Forum"], .card_title_fname');
+            if (forumEl) dom.forum_name = (forumEl.textContent || '').trim();
+            
+            // Reply count (wider selectors from v3 that worked)
+            const replyEl = document.querySelector('[class*="reply"], [class*="Reply"], .l_reply_num, [class*="post_num"]');
+            if (replyEl) {
+                const replyNums = (replyEl.textContent || '').match(/\\d+/g);
+                if (replyNums) dom.reply_count = parseInt(replyNums[0]);
+            }
+            
+            // Author from DOM (if not found in data-field)
+            if (!dom.author_name) {
+                const authorEl = document.querySelector('[class*="author"], [class*="Author"], .p_author_name');
+                if (authorEl) dom.author_name = (authorEl.getAttribute('data-username') || authorEl.textContent || '').trim();
+            }
+            
+            // Time - look in the first post area for date patterns
+            if (!dom.time_unix && firstPostDiv) {
+                const tailInfos = firstPostDiv.querySelectorAll('[class*="tail"]');
+                tailInfos.forEach(el => {
+                    const t = (el.textContent || '').trim();
+                    if (/\\d{4}[-/]\\d{2}[-/]\\d{2}/.test(t) || /\\d{2}:\\d{2}/.test(t)) {
+                        dom.time_text = t;
+                    }
+                });
+            }
+            
+            return dom;
+        }""")
+        
+        utils.logger.info(f"[_extract_note_from_page] js_data type: {type(js_data).__name__}, "
+                         f"keys: {list((js_data or {}).keys()) if isinstance(js_data, dict) else 'N/A'}")
+        
+        # First try the old HTML extractor; never let a parser failure discard the
+        # JS-extracted data we already have above.
+        try:
+            note_detail = self._page_extractor.extract_note_detail(page_html)
+        except Exception as html_e:
+            utils.logger.warning(
+                f"[_extract_note_from_page] HTML extractor failed ({html_e}); "
+                f"building note from JS-extracted data only"
+            )
+            note_detail = TiebaNote(
+                note_id=note_id,
+                title="",
+                note_url=f"https://tieba.baidu.com/p/{note_id}",
+                tieba_name="",
+                tieba_link="https://tieba.baidu.com",
+            )
+        
+        # Override with JS data as primary source
+        if isinstance(js_data, dict):
+            # Handle wrapped format {dom: ..., full_data: ...}
+            dom = js_data.get("dom") or js_data  # both flat and wrapped
+            
+            if "full_data" in js_data and js_data["full_data"]:
+                full_data = js_data["full_data"]
+                thread = full_data.get("thread") or {}
+                forum = full_data.get("forum") or {}
+                
+                note_detail.note_id = note_id
+                note_detail.note_url = f"https://tieba.baidu.com/p/{note_id}"
+                note_detail.desc = html.unescape(
+                    thread.get("first_post_content") or thread.get("abstract") or ""
+                )[:2000]
+                note_detail.publish_time = utils.get_time_str_from_unix_time(
+                    thread.get("create_time") or thread.get("first_post_time") or 0
+                )
+                note_detail.total_replay_num = thread.get("reply_num") or 0
+                note_detail.total_replay_page = full_data.get("page", {}).get("total_page") or 1
+                
+                fname = forum.get("name") or ""
+                if fname:
+                    note_detail.tieba_name = fname + "吧" if not fname.endswith("吧") else fname
+                    note_detail.tieba_link = f"https://tieba.baidu.com/f?kw={fname}"
+                
+                user_map = full_data.get("user_list") or {}
+                if user_map:
+                    first_author = next(iter(user_map.values()), {})
+                    note_detail.user_nickname = first_author.get("name_show") or first_author.get("name") or ""
+                    note_detail.creator_hash = anonymize_user_id(first_author.get("id") or first_author.get("portrait") or "")
+            
+            # DOM-based data
+            note_detail.note_id = note_id
+            note_detail.note_url = f"https://tieba.baidu.com/p/{note_id}"
+            
+            if dom.get("title") and (not note_detail.title or '安全验证' in note_detail.title or 'Internal Server Error' in note_detail.title):
+                note_detail.title = dom["title"]
+            
+            # Post text from data-field (clean) or DOM (broader, works)
+            post_text = dom.get("post_text") or dom.get("first_post_text") or ""
+            if post_text:
+                note_detail.desc = post_text[:2000]
+            
+            if dom.get("time_text") and not note_detail.publish_time:
+                note_detail.publish_time = dom["time_text"]
+            if dom.get("time_date") and not note_detail.publish_time:
+                note_detail.publish_time = dom["time_date"]
+            if dom.get("time_unix") and not note_detail.publish_time:
+                note_detail.publish_time = utils.get_time_str_from_unix_time(dom["time_unix"])
+                
+            if dom.get("author_name") and (not note_detail.user_nickname or note_detail.user_nickname == "*"):
+                note_detail.user_nickname = dom["author_name"]
+            if dom.get("author_id") and note_detail.creator_hash == "7291ca9e236ddafc":
+                note_detail.creator_hash = anonymize_user_id(dom["author_id"])
+            if dom.get("forum_name") and not note_detail.tieba_name:
+                fname = dom["forum_name"]
+                note_detail.tieba_name = fname + "吧" if not fname.endswith("吧") else fname
+                note_detail.tieba_link = f"https://tieba.baidu.com/f?kw={fname}"
+            if dom.get("reply_count") and not note_detail.total_replay_num:
+                note_detail.total_replay_num = int(dom["reply_count"])
+            
+            # Parse data-field JSON for structured data (more precise)
+            fp = dom.get("first_post_data")
+            if fp and isinstance(fp, dict):
+                if not note_detail.publish_time and fp.get("date"):
+                    note_detail.publish_time = fp["date"]
+                elif not note_detail.publish_time:
+                    note_detail.publish_time = utils.get_time_str_from_unix_time(fp.get("time") or 0)
+                if (not note_detail.user_nickname or note_detail.user_nickname == "*") and fp.get("author"):
+                    author = fp["author"]
+                    note_detail.user_nickname = author.get("user_name") or author.get("name_show") or ""
+                    note_detail.creator_hash = anonymize_user_id(author.get("user_id") or author.get("portrait") or "")
+                if not note_detail.desc and fp.get("content"):
+                    content = fp["content"]
+                    note_detail.desc = (content if isinstance(content, str) else content.get("text", ""))[:2000]
+        
+        # Final fallback: ensure minimum required fields from params
+        if not note_detail.note_id:
+            note_detail.note_id = note_id
+        if not note_detail.note_url or note_detail.note_url.endswith("/"):
+            note_detail.note_url = f"https://tieba.baidu.com/p/{note_id}"
+        if not note_detail.total_replay_page:
+            note_detail.total_replay_page = 1  # Always try page 1
+        
+        # Post-process: clean desc and extract missing fields from desc text
+        # (never let a post-processing failure kill an already-extracted note)
+        try:
+            self._post_process_note(note_detail)
+        except Exception as pp_e:
+            utils.logger.warning(f"[_extract_note_from_page] Post-process note failed: {pp_e}")
+            
+        utils.logger.info(
+            f"[_extract_note_from_page] Extracted - title: {note_detail.title[:40] if note_detail.title else 'EMPTY'}, "
+            f"desc: {len(note_detail.desc or '')} chars, time: {note_detail.publish_time or 'EMPTY'}, "
+            f"author: {note_detail.user_nickname or 'EMPTY'}, forum: {note_detail.tieba_name or 'EMPTY'}, "
+            f"replies: {note_detail.total_replay_num}"
+        )
+        return note_detail
+
+    def _post_process_note(self, note_detail: TiebaNote):
+        """Clean desc and extract missing fields from desc text."""
+        if not note_detail.desc:
+            return
+        
+        desc = note_detail.desc
+        
+        # Remove navigation/sidebar boilerplate
+        desc = re.sub(r'首页\s+我的\s+我常逛的吧.*?展开全部', '', desc, flags=re.DOTALL)
+        desc = re.sub(r'我玩过的游戏\s+.*?热门游戏\s+折叠导航栏', '', desc, flags=re.DOTALL)
+        desc = re.sub(r'全部回复\s*\(\d+\).*?去APP回复经验更多', '', desc, flags=re.DOTALL)
+        desc = re.sub(r'进吧看看.*$', '', desc, flags=re.DOTALL)
+        desc = re.sub(r'百度版权声明.*$', '', desc, flags=re.DOTALL)
+        desc = re.sub(r'\S+吧\s+关注[\d.]+[W万K千].*$', '', desc)
+        
+        # Extract publish time from text patterns like "07-25 山东" or "2025-09-23"
+        if not note_detail.publish_time:
+            time_patterns = [
+                r'(\d{4}-\d{2}-\d{2}\s*\d{2}:\d{2})',  # 2025-09-23 14:30
+                r'(\d{2}-\d{2})\s+\S+',  # 07-25 山东
+                r'(\d{4}-\d{2}-\d{2})',  # 2025-09-23
+                r'(\d{4}年\d{1,2}月\d{1,2}日)',  # 2025年9月23日
+            ]
+            for pattern in time_patterns:
+                match = re.search(pattern, desc)
+                if match:
+                    note_detail.publish_time = match.group(1).strip()
+                    break
+        
+        # Extract author name from text (appears before post title/date)
+        if not note_detail.user_nickname or note_detail.user_nickname == "*":
+            # P2 fix: the raw page text starts with navigation boilerplate
+            # ("首页 我的 我常逛的吧…折叠导航栏"), which a loose regex mistakes for
+            # an author block (10 条里 9 条 user_nickname 被提取成整段导航文本).
+            # Three guards:
+            #   1) search only the content region AFTER the navigation markers;
+            #   2) the name class contains NO spaces, so it cannot span the
+            #      space-separated navigation tokens ("XXX 吧 YYY 吧 …");
+            #   3) sanity-check the extracted name (short, no nav words).
+            content_desc = desc
+            for nav_marker in ("折叠导航栏", "热门游戏"):
+                marker_idx = content_desc.rfind(nav_marker)
+                if marker_idx != -1:
+                    content_desc = content_desc[marker_idx + len(nav_marker):]
+            author_match = re.search(
+                r'((?:贴吧用户_\w+|[\u4e00-\u9fff\w·◎☜🌙🍺🔥🌈]+?))\s*(?:贴吧(?:SVIP|VIP|成长等级)|吧主|小吧主|楼主)',
+                content_desc
+            )
+            if author_match:
+                name = author_match.group(1).strip()
+                nav_words = ("首页", "我的", "折叠", "导航", "登录", "注册", "我常逛的", "大家都在逛的", "热门游戏", "展开", "进吧", "去APP")
+                if name and len(name) <= 20 and not any(word in name for word in nav_words):
+                    note_detail.user_nickname = name
+                    note_detail.creator_hash = anonymize_user_id(name)
+        
+        # Trim desc
+        desc = desc.strip()
+        if len(desc) > 2000:
+            # Try to find a natural break point
+            cut = desc.rfind('。', 1000, 2000)
+            if cut < 1000:
+                cut = desc.rfind('\n', 1000, 2000)
+            note_detail.desc = desc[:cut if cut > 500 else 2000]
+        else:
+            note_detail.desc = desc
 
     async def get_note_all_comments(
         self,
@@ -457,48 +759,182 @@ class BaiduTieBaClient(AbstractApiClient):
         max_count: int = 10,
     ) -> List[TiebaComment]:
         """
-        Get all first-level comments for specified post (uses Playwright to access page, avoiding API detection)
-        Args:
-            note_detail: Post detail object
-            crawl_interval: Crawl delay interval in seconds
-            callback: Callback function after one post crawl completes
-            max_count: Maximum number of comments to crawl per post
-        Returns:
-            List[TiebaComment]: Comment list
+        Get all first-level comments by intercepting the page_pc API response.
+
+        Strategy: Navigate to the post page, let the page's own JavaScript call
+        c/f/pb/page_pc (with correct signing), capture the response JSON,
+        and extract post_list from it. This bypasses the 110001 signature error.
         """
         if not self.playwright_page:
-            utils.logger.error("[BaiduTieBaClient.get_note_all_comments] playwright_page is None, cannot use browser mode")
+            utils.logger.error("[BaiduTieBaClient.get_note_all_comments] playwright_page is None")
             raise Exception("playwright_page is required for browser-based comment fetching")
 
         result: List[TiebaComment] = []
         current_page = 1
+        max_pages = max(note_detail.total_replay_page or 1, 1)
 
-        while note_detail.total_replay_page >= current_page and len(result) < max_count:
+        while current_page <= max_pages and len(result) < max_count:
             utils.logger.info(
-                f"[BaiduTieBaClient.get_note_all_comments] Accessing comment API, "
+                f"[get_note_all_comments] page_pc interception, "
                 f"note_id: {note_detail.note_id}, page: {current_page}"
             )
 
             try:
-                api_data = await self._get_pc_page_data(note_id=note_detail.note_id, page=current_page)
-                comments = self._page_extractor.extract_tieba_note_parent_comments_from_api(
-                    api_data, note_detail=note_detail
-                )
+                api_response_data = {}
 
-                if not comments:
-                    utils.logger.info(f"[BaiduTieBaClient.get_note_all_comments] Page {current_page} has no comments, stopping crawl")
+                async def capture_page_pc(response):
+                    url = response.url
+                    if "/c/f/pb/page_pc" in url and response.status == 200:
+                        try:
+                            body = await response.text()
+                            data = json.loads(body)
+                            if data.get("post_list") and len(data.get("post_list", [])) > 0:
+                                # Only capture first valid response per page
+                                if "data" not in api_response_data:
+                                    api_response_data["data"] = data
+                                    utils.logger.info(
+                                        f"[capture_page_pc] Got {len(data['post_list'])} posts "
+                                        f"(page {data.get('page', {}).get('current_page', '?')})"
+                                    )
+                        except Exception:
+                            pass
+
+                self.playwright_page.on("response", capture_page_pc)
+
+                try:
+                    post_url = f"{self._host}/p/{note_detail.note_id}?pn={current_page}"
+                    await self.playwright_page.goto(post_url, wait_until="domcontentloaded", timeout=20000)
+
+                    # Wait for page_pc response
+                    for _ in range(20):
+                        if "data" in api_response_data:
+                            break
+                        await asyncio.sleep(0.5)
+
+                    if "data" not in api_response_data:
+                        await self.playwright_page.evaluate(
+                            "window.scrollTo(0, document.body.scrollHeight)"
+                        )
+                        await asyncio.sleep(3)
+                finally:
+                    self.playwright_page.remove_listener("response", capture_page_pc)
+
+                if "data" not in api_response_data:
+                    utils.logger.warning("[get_note_all_comments] No page_pc response captured")
                     break
 
-                # Limit comment count
-                if len(result) + len(comments) > max_count:
-                    comments = comments[:max_count - len(result)]
+                api_data = api_response_data["data"]
+                post_list = api_data.get("post_list", [])
+                page_info = api_data.get("page", {})
+
+                utils.logger.info(
+                    f"[get_note_all_comments] post_list length: {len(post_list)}, "
+                    f"page {page_info.get('current_page', '?')}/{page_info.get('total_page', '?')}"
+                )
+
+                if len(post_list) <= 1:
+                    break  # Only OP, no comments
+
+                actual_total_page = page_info.get("total_page", 0)
+                if actual_total_page > max_pages:
+                    max_pages = min(actual_total_page, 20)
+
+                user_map = {
+                    str(u.get("id", "")): u
+                    for u in api_data.get("user_list", [])
+                    if u.get("id")
+                }
+
+                forum = api_data.get("forum") or api_data.get("display_forum") or {}
+                tieba_name = note_detail.tieba_name
+                if not tieba_name and forum.get("name"):
+                    tieba_name = forum.get("name")
+                    if not tieba_name.endswith("吧"):
+                        tieba_name += "吧"
+
+                # Update note_detail with thread-level data from page_pc API
+                thread = api_data.get("thread") or {}
+                if not note_detail.total_replay_num and thread.get("reply_num"):
+                    note_detail.total_replay_num = thread["reply_num"]
+                if not note_detail.total_replay_page and page_info.get("total_page"):
+                    note_detail.total_replay_page = page_info["total_page"]
+                if thread.get("create_time") and not note_detail.create_time_unix:
+                    note_detail.create_time_unix = thread["create_time"]
+                    if not note_detail.publish_time or "-" not in (note_detail.publish_time or ""):
+                        note_detail.publish_time = utils.get_time_str_from_unix_time(thread["create_time"])
+                if thread.get("share_num"):
+                    note_detail.share_num = thread["share_num"]
+                if thread.get("agree_num"):
+                    note_detail.agree_num = thread["agree_num"]
+                if forum.get("first_class"):
+                    note_detail.forum_first_class = forum["first_class"]
+                if forum.get("second_class"):
+                    note_detail.forum_second_class = forum["second_class"]
+
+                comments = []
+                for item in post_list[1:]:
+                    if len(comments) + len(result) >= max_count:
+                        break
+
+                    comment_id = str(item.get("id", ""))
+                    if not comment_id:
+                        continue
+
+                    content = item.get("content", "")
+                    if isinstance(content, list):
+                        content = "".join(
+                            c.get("text", "") for c in content if isinstance(c, dict)
+                        )
+                    content = (content or "").strip()
+                    if not content:
+                        continue
+
+                    author_id = str(item.get("author_id", ""))
+                    author = user_map.get(author_id, {})
+                    author_name = author.get("name_show") or author.get("name") or "*"
+
+                    comment = TiebaComment(
+                        comment_id=comment_id,
+                        content=content[:2000],
+                        note_url=note_detail.note_url,
+                        creator_hash=anonymize_user_id(
+                            author.get("portrait") or author_id
+                        ),
+                        user_nickname=author_name,
+                        tieba_id=str(forum.get("id", "")),
+                        tieba_name=tieba_name,
+                        tieba_link=note_detail.tieba_link or (
+                            f"https://tieba.baidu.com/f?kw={tieba_name}"
+                            if tieba_name else ""
+                        ),
+                        publish_time=utils.get_time_str_from_unix_time(
+                            item.get("time", 0)
+                        ),
+                        note_id=note_detail.note_id,
+                        sub_comment_count=item.get("sub_post_number", 0),
+                        # New fields from page_pc API
+                        floor=item.get("floor", 0),
+                        agree_num=item.get("agree", {}).get("agree_num", 0) if isinstance(item.get("agree"), dict) else 0,
+                        author_level_name=author.get("level_name", ""),
+                        author_ip_address=author.get("ip_address", ""),
+                        author_gender=author.get("gender", 0),
+                        author_is_bawu=author.get("is_bawu", 0),
+                    )
+                    comments.append(comment)
+
+                if not comments:
+                    utils.logger.info(f"[get_note_all_comments] No comments on page {current_page}, stopping")
+                    break
 
                 if callback:
                     await callback(note_detail.note_id, comments)
 
                 result.extend(comments)
+                utils.logger.info(
+                    f"[get_note_all_comments] Added {len(comments)} comments from page {current_page}"
+                )
 
-                # Get all sub-comments
+                # Get sub-comments
                 await self.get_comments_all_sub_comments(
                     comments, crawl_interval=crawl_interval, callback=callback
                 )
@@ -507,10 +943,14 @@ class BaiduTieBaClient(AbstractApiClient):
                 current_page += 1
 
             except Exception as e:
-                utils.logger.error(f"[BaiduTieBaClient.get_note_all_comments] Failed to get page {current_page} comments: {e}")
+                utils.logger.error(
+                    f"[get_note_all_comments] Error on page {current_page}: {e}"
+                )
                 break
 
-        utils.logger.info(f"[BaiduTieBaClient.get_note_all_comments] Total retrieved {len(result)} first-level comments")
+        utils.logger.info(
+            f"[get_note_all_comments] Done: {len(result)} comments total"
+        )
         return result
 
     async def get_comments_all_sub_comments(

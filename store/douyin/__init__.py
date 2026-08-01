@@ -210,6 +210,7 @@ async def update_dy_aweme_comment(aweme_id: str, comment_item: Dict):
         "last_modify_ts": utils.get_current_timestamp(),
         "parent_comment_id": parent_comment_id,
         "pictures": ",".join(_extract_comment_image_list(comment_item)),
+        "ip_location": comment_item.get("ip_label", "") or (comment_item.get("client_info") or {}).get("province", ""),  # IP 属地，ip_label 优先
     }
     utils.logger.info(f"[store.douyin.update_dy_aweme_comment] douyin aweme comment: {comment_id}, content: {save_comment_item.get('content')}")
 

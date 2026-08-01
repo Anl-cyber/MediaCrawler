@@ -434,7 +434,13 @@ class BilibiliCrawler(AbstractCrawler):
 
                 return result
             except DataFetchError as ex:
-                utils.logger.error(f"[BilibiliCrawler.get_video_info_task] Get video detail error: {ex}")
+                # 带上视频 ID：便于区分"单条视频不可见(已删除/私密/风控)"与系统性故障。
+                # 经实测，view/detail 对搜索列表中少量已删除/不可见稿件会返回
+                # -404 啥都木有 / 62002 稿件不可见，属数据问题而非 WBI 签名问题。
+                utils.logger.error(
+                    f"[BilibiliCrawler.get_video_info_task] Get video detail error: {ex} "
+                    f"(aid={aid}, bvid={bvid})"
+                )
                 return None
             except KeyError as ex:
                 utils.logger.error(f"[BilibiliCrawler.get_video_info_task] have not fund note detail video_id:{bvid}, err: {ex}")

@@ -37,11 +37,23 @@ import config
 from database import db
 from base.base_crawler import AbstractCrawler
 # 平台模块懒加载——缺 model/libs 等文件时仅跳过该平台，不崩其他平台
+# 模块短名 → Crawler 类名的精确映射（.capitalize() 无法正确处理 DouYin/XiaoHongShu/TieBa 等）
+_PLATFORM_CLASS_MAP = {
+    "bilibili": "BilibiliCrawler",
+    "douyin": "DouYinCrawler",
+    "kuaishou": "KuaishouCrawler",
+    "tieba": "TieBaCrawler",
+    "weibo": "WeiboCrawler",
+    "xhs": "XiaoHongShuCrawler",
+    "zhihu": "ZhihuCrawler",
+}
+
 def _try_import(module_path: str):
     try:
         import importlib
         m = importlib.import_module(module_path)
-        cls_name = module_path.rsplit('.', 1)[-1].capitalize() + 'Crawler'
+        short_name = module_path.rsplit('.', 1)[-1]
+        cls_name = _PLATFORM_CLASS_MAP.get(short_name, short_name.capitalize() + 'Crawler')
         return getattr(m, cls_name)
     except Exception:
         return None
@@ -55,8 +67,18 @@ if DouYinCrawler is None:
         pass
 KuaishouCrawler = _try_import("media_platform.kuaishou")
 TieBaCrawler = _try_import("media_platform.tieba")
+if TieBaCrawler is None:
+    try:
+        from media_platform.tieba import TieBaCrawler
+    except Exception:
+        pass
 WeiboCrawler = _try_import("media_platform.weibo")
 XiaoHongShuCrawler = _try_import("media_platform.xhs")
+if XiaoHongShuCrawler is None:
+    try:
+        from media_platform.xhs import XiaoHongShuCrawler
+    except Exception:
+        pass
 ZhihuCrawler = _try_import("media_platform.zhihu")
 from tools.async_file_writer import AsyncFileWriter
 from var import crawler_type_var

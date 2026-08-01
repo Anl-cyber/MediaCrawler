@@ -246,6 +246,11 @@ class TiebaNote(Base):
     add_ts = Column(BigInteger, comment='添加时间戳')
     last_modify_ts = Column(BigInteger, comment='最后修改时间戳')
     source_keyword = Column(Text, default='', comment='来源关键词')
+    create_time_unix = Column(BigInteger, default=0, comment='创建时间Unix')
+    share_num = Column(Integer, default=0, comment='分享数')
+    agree_num = Column(Integer, default=0, comment='点赞数')
+    forum_first_class = Column(String(255), default='', comment='一级分类')
+    forum_second_class = Column(String(255), default='', comment='二级分类')
 
 class TiebaComment(Base):
     __tablename__ = 'tieba_comment'
@@ -264,6 +269,12 @@ class TiebaComment(Base):
     note_url = Column(Text, comment='笔记URL')
     add_ts = Column(BigInteger, comment='添加时间戳')
     last_modify_ts = Column(BigInteger, comment='最后修改时间戳')
+    floor = Column(Integer, default=0, comment='楼层号')
+    agree_num = Column(Integer, default=0, comment='点赞数')
+    author_level_name = Column(String(64), default='', comment='作者等级名')
+    author_ip_address = Column(String(64), default='', comment='作者IP属地')
+    author_gender = Column(Integer, default=0, comment='作者性别 1=男2=女')
+    author_is_bawu = Column(Integer, default=0, comment='是否吧务')
 
 class ZhihuContent(Base):
     __tablename__ = 'zhihu_content'

@@ -140,7 +140,7 @@ async def update_weibo_note_comment(note_id: str, comment_item: Dict):
     content_text = comment_item.get("text")
     clean_text = re.sub(r"<.*?>", "", content_text)
     # 教学版：原始 user_id 匿名化为 creator_hash，昵称脱敏；
-    # 不采集头像/主页链接/性别/IP 归属地等可定位真人的信息。
+    # IP 属地取自 comment.source（格式"来自广东"），仅保留省份做地域统计，不定位个人。
     save_comment_item = {
         "comment_id": comment_id,
         "create_time": utils.rfc2822_to_timestamp(comment_item.get("created_at")),
@@ -151,8 +151,9 @@ async def update_weibo_note_comment(note_id: str, comment_item: Dict):
         "comment_like_count": str(comment_item.get("like_count", 0)),
         "last_modify_ts": utils.get_current_timestamp(),
         "parent_comment_id": comment_item.get("rootid", ""),
+        "ip_location": str(comment_item.get("source", "")).replace("来自", ""),  # IP 属地: 广东
 
-        # 创作者信息（匿名化/脱敏，不含原始 user_id/avatar/gender/profile_url/ip_location）
+        # 创作者信息（匿名化/脱敏，不含原始 user_id/avatar/gender/profile_url）
         "creator_hash": anonymize_user_id(user_info.get("id")),
         "nickname": mask_nickname(user_info.get("screen_name", "")),
     }

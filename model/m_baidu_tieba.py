@@ -33,13 +33,19 @@ class TiebaNote(BaseModel):
     desc: str = Field(default="", description="Post description")
     note_url: str = Field(..., description="Post link")
     publish_time: str = Field(default="", description="Publish time")
-    creator_hash: str = Field(default="", description="创作者匿名哈希(不存原始用户链接)")
-    user_nickname: str = Field(default="", description="User nickname (已脱敏)")
+    create_time_unix: int = Field(default=0, description="Create time (Unix timestamp, from page_pc API)")
+    creator_hash: str = Field(default="", description="Creator anonymized hash")
+    user_nickname: str = Field(default="", description="User nickname (masked)")
     tieba_name: str = Field(..., description="Tieba name")
     tieba_link: str = Field(..., description="Tieba link")
     total_replay_num: int = Field(default=0, description="Total reply count")
     total_replay_page: int = Field(default=0, description="Total reply pages")
     source_keyword: str = Field(default="", description="Source keyword")
+    # New fields from page_pc API
+    share_num: int = Field(default=0, description="Share count")
+    agree_num: int = Field(default=0, description="Agree/Like count")
+    forum_first_class: str = Field(default="", description="Forum first-level category")
+    forum_second_class: str = Field(default="", description="Forum second-level category")
 
 
 class TiebaComment(BaseModel):
@@ -50,8 +56,8 @@ class TiebaComment(BaseModel):
     comment_id: str = Field(..., description="Comment ID")
     parent_comment_id: str = Field(default="", description="Parent comment ID")
     content: str = Field(..., description="Comment content")
-    creator_hash: str = Field(default="", description="创作者匿名哈希(不存原始用户链接)")
-    user_nickname: str = Field(default="", description="User nickname (已脱敏)")
+    creator_hash: str = Field(default="", description="Creator anonymized hash")
+    user_nickname: str = Field(default="", description="User nickname (masked)")
     publish_time: str = Field(default="", description="Publish time")
     sub_comment_count: int = Field(default=0, description="Sub-comment count")
     note_id: str = Field(..., description="Post ID")
@@ -59,6 +65,13 @@ class TiebaComment(BaseModel):
     tieba_id: str = Field(..., description="Tieba ID")
     tieba_name: str = Field(..., description="Tieba name")
     tieba_link: str = Field(..., description="Tieba link")
+    # New fields from page_pc API
+    floor: int = Field(default=0, description="Floor number")
+    agree_num: int = Field(default=0, description="Agree/Like count")
+    author_level_name: str = Field(default="", description="Author level name")
+    author_ip_address: str = Field(default="", description="Author IP location")
+    author_gender: int = Field(default=0, description="Author gender (1=male, 2=female)")
+    author_is_bawu: int = Field(default=0, description="Is forum moderator (1=yes)")
 
 
 class TiebaCreator(BaseModel):

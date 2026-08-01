@@ -58,6 +58,7 @@ class ZhihuComment(BaseModel):
     content_type: str = Field(default="", description="Content type (article | answer | zvideo)")
     creator_hash: str = Field(default="", description="Creator anonymized hash")
     user_nickname: str = Field(default="", description="User nickname (masked)")
+    ip_location: str = Field(default="", description="IP location (from comment_tags[ip_info] or address_text)")
 
 
 class ZhihuCreator(BaseModel):
