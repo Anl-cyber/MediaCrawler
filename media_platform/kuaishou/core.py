@@ -127,6 +127,25 @@ class KuaishouCrawler(AbstractCrawler):
 
             utils.logger.info("[KuaishouCrawler.start] Kuaishou Crawler finished ...")
 
+    @staticmethod
+    def _normalize_feed_item(video_detail: Dict) -> Dict:
+        """Normalize REST feed item to be compatible with store expectations.
+
+        The REST /rest/v/search/feed photo payload lacks ``realLikeCount`` and
+        ``photoUrl`` that the old GraphQL search returned; map them from
+        ``likeCount`` / ``photoUrls`` so kuaishou_store.update_kuaishou_video
+        saves meaningful values.
+        """
+        photo: Dict = video_detail.get("photo") or {}
+        if photo.get("realLikeCount") is None and photo.get("likeCount") is not None:
+            photo["realLikeCount"] = photo["likeCount"]
+        if not photo.get("photoUrl"):
+            photo_urls = photo.get("photoUrls")
+            if isinstance(photo_urls, list) and photo_urls:
+                first = photo_urls[0]
+                photo["photoUrl"] = first.get("url") if isinstance(first, dict) else first
+        return video_detail
+
     async def search(self):
         utils.logger.info("[KuaishouCrawler.search] Begin search kuaishou keywords")
         ks_limit_count = 20  # kuaishou limit page fixed value
@@ -156,22 +175,20 @@ class KuaishouCrawler(AbstractCrawler):
                     pcursor=str(page),
                     search_session_id=search_session_id,
                 )
-                if not videos_res:
+                # REST /rest/v/search/feed returns a flat response:
+                # {result, feeds:[...], pcursor, searchSessionId, ...}
+                if not videos_res or videos_res.get("result") != 1:
                     utils.logger.error(
                         f"[KuaishouCrawler.search] search info by keyword:{keyword} not found data"
                     )
                     break
 
-                vision_search_photo: Dict = videos_res.get("visionSearchPhoto")
-                if vision_search_photo.get("result") != 1:
-                    utils.logger.error(
-                        f"[KuaishouCrawler.search] search info by keyword:{keyword} not found data "
-                    )
-                    break
-                search_session_id = vision_search_photo.get("searchSessionId", "")
-                for video_detail in vision_search_photo.get("feeds"):
+                search_session_id = videos_res.get("searchSessionId", "")
+                for video_detail in videos_res.get("feeds") or []:
                     video_id_list.append(video_detail.get("photo", {}).get("id"))
-                    await kuaishou_store.update_kuaishou_video(video_item=video_detail)
+                    await kuaishou_store.update_kuaishou_video(
+                        video_item=self._normalize_feed_item(video_detail)
+                    )
 
                 # batch fetch video comments
                 page += 1
