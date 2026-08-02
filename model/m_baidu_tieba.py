@@ -19,6 +19,7 @@
 
 
 # -*- coding: utf-8 -*-
+import math
 import re
 from typing import Optional
 
@@ -32,33 +33,59 @@ def parse_reply_count(value) -> int:
     等缩写格式（实测 DOM 与搜索 API 均会出现）。TiebaNote.total_replay_num 声明为
     int，直接传 "22W" 会让 pydantic 校验失败 → ValidationError → 整页解析中断
     （2026-08-02 实测：BaiduTieBaCrawler.search 整页 0 条）。本函数在塞进模型前
-    统一转换：22W→220000、1.2W→12000、3.5K→3500、1.2万→12000。
+    统一转换：22W→220000、1.2W→12000、3.5K→3500、1.2万→12000、1.2亿→120000000。
+
+    加固3（2026-08-02 fresh-eyes 返修）：
+    - '亿' 单位支持（旧实现只认 W/万/K，'1.2亿' 会回落首整数 → 1）；
+    - 前缀/混合格式支持（'约1.2万'→12000、'12万3000'→120000、'22W回复贴'→220000），
+      由"endswith 截尾"改为"regex 提取 数字+单位 组合"；
+    - 负数 clamp 0；'inf'/'nan' 回落 0（旧实现 'inf' 会 OverflowError 逃逸）；
+    - 科学计数法 '1.2e4'→12000 行为保留。
     """
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
-        return value
+        return max(value, 0)
     if isinstance(value, float):
-        return int(value)
+        if not math.isfinite(value):
+            return 0
+        return max(int(value), 0)
     if value is None:
         return 0
     s = str(value).strip().replace(",", "").replace("，", "")
     if not s:
         return 0
-    mult = 1
     upper = s.upper()
-    if upper.endswith("W") or upper.endswith("万"):
-        mult = 10000
-        s = s[:-1]
-    elif upper.endswith("K"):
-        mult = 1000
-        s = s[:-1]
-    s = s.strip()
+    # 数字 + 单位组合（覆盖 W/万/亿/K/千，含前缀 '约1.2万'、混合 '12万3000'、
+    # 后缀 '22W回复贴' 等实际显示文本）
+    m = re.search(r"(\d+(?:\.\d+)?)\s*([亿万千WK])", upper)
+    if m:
+        try:
+            num = float(m.group(1))
+        except (TypeError, ValueError):
+            num = 0.0
+        mult = {
+            "亿": 100000000, "万": 10000, "W": 10000,
+            "千": 1000, "K": 1000,
+        }.get(m.group(2), 1)
+        try:
+            return max(int(num * mult), 0)
+        except OverflowError:
+            return 0
+    # 无单位：纯数字 / 科学计数法 / 小数（'12345'、'1.2e4'、'3.9'）
     try:
-        return int(float(s) * mult)
+        f = float(upper)
     except (TypeError, ValueError):
-        m = re.search(r"\d+", s)
-        return int(m.group(0)) if m else 0
+        m2 = re.search(r"-?\d+", upper)
+        if not m2:
+            return 0
+        try:
+            return max(int(m2.group(0)), 0)
+        except (TypeError, ValueError):
+            return 0
+    if not math.isfinite(f):
+        return 0
+    return max(int(f), 0)
 
 
 class TiebaNote(BaseModel):
@@ -117,6 +144,15 @@ class TiebaComment(BaseModel):
     author_ip_address: str = Field(default="", description="Author IP location")
     author_gender: int = Field(default=0, description="Author gender (1=male, 2=female)")
     author_is_bawu: int = Field(default=0, description="Is forum moderator (1=yes)")
+
+    # 加固2：评论 API/DOM 若返回 '1.2W'/'1,234' 等缩写/格式化字符串，int 字段构造时
+    # 会 ValidationError → 整批评论采集崩溃（core.py get_note_all_comments 无 try/except、
+    # batch gather 无 return_exceptions，search 流程会 break 掉整个关键词循环）。
+    # 与 TiebaNote 同模式容错（mode="before" 在 int core 校验前拦截）。
+    @field_validator("sub_comment_count", "floor", "agree_num", mode="before")
+    @classmethod
+    def _validate_comment_count(cls, v):
+        return parse_reply_count(v)
 
 
 class TiebaCreator(BaseModel):

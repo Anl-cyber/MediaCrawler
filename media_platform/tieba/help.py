@@ -236,8 +236,9 @@ class TieBaExtractor:
         return TiebaCreator(
             creator_hash=anonymize_user_id(str(user.get("id", ""))),
             user_nickname=mask_nickname(str(user.get("name_show") or user.get("name") or "")),
-            follows=int(user.get("concern_num") or 0),
-            fans=int(user.get("fans_num") or 0),
+            # 加固2：关注/粉丝数同走 parse_reply_count（旧实现 int() 遇 '1.2万' 会 ValueError）
+            follows=parse_reply_count(user.get("concern_num")),
+            fans=parse_reply_count(user.get("fans_num")),
             registration_duration=str(user.get("tb_age", "")),
         )
 
@@ -448,7 +449,8 @@ class TieBaExtractor:
                 tieba_name=tieba_name,
                 tieba_link=tieba_link,
                 publish_time=publish_time,
-                total_replay_num=extractor._text_to_int(comment_text),
+                # 加固1：'22W' 等缩写格式不再被 _text_to_int 低估为 22（改走统一解析）
+                total_replay_num=parse_reply_count(comment_text),
             )
             result.append(tieba_note)
         return result

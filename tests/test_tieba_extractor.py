@@ -28,6 +28,28 @@ def test_parse_reply_count_formats():
     assert parse_reply_count("1,234") == 1234
 
 
+def test_parse_reply_count_hardening():
+    # 加固3 fresh-eyes 返修：亿/前缀/混合/小写/千/负数/inf/nan/科学计数法
+    assert parse_reply_count("1.2亿") == 120000000
+    assert parse_reply_count("9999万") == 99990000
+    assert parse_reply_count("1.8w") == 18000
+    assert parse_reply_count("1.2k") == 1200
+    assert parse_reply_count("12,345,678") == 12345678
+    assert parse_reply_count("约1.2万") == 12000      # 前缀不破解析
+    assert parse_reply_count("12万3000") == 120000    # 万+数字混合取下限
+    assert parse_reply_count("22W回复贴") == 220000   # 后缀文本不再回落 22
+    assert parse_reply_count("5千") == 5000
+    assert parse_reply_count("1万2千") == 10000       # 混合取首个数字+单位
+    assert parse_reply_count("-5") == 0               # 负数 clamp
+    assert parse_reply_count("1.2e4") == 12000        # 科学计数法保留
+    assert parse_reply_count("inf") == 0              # 不再 OverflowError 逃逸
+    assert parse_reply_count("nan") == 0
+    assert parse_reply_count(float("inf")) == 0
+    assert parse_reply_count(float("nan")) == 0
+    assert parse_reply_count(True) == 1
+    assert parse_reply_count(False) == 0
+
+
 def test_tieba_note_model_accepts_w_format_reply_count():
     # 模型构造时容错：total_replay_num="22W" 不再抛 pydantic ValidationError
     note = TiebaNote(
@@ -39,6 +61,26 @@ def test_tieba_note_model_accepts_w_format_reply_count():
         total_replay_num="22W",
     )
     assert note.total_replay_num == 220000
+
+
+def test_tieba_comment_model_accepts_abbrev_counts():
+    # 加固2：TiebaComment 的 sub_comment_count/floor/agree_num 同样容错，
+    # 评论 API 若返回 '1.2W'/'3.5K' 不再整批崩溃
+    comment = TiebaComment(
+        comment_id="c1",
+        content="测试评论",
+        note_url="https://tieba.baidu.com/p/1",
+        note_id="1",
+        tieba_id="1",
+        tieba_name="诸城吧",
+        tieba_link="https://tieba.baidu.com",
+        sub_comment_count="1.2W",
+        floor="3.5K",
+        agree_num="22W",
+    )
+    assert comment.sub_comment_count == 12000
+    assert comment.floor == 3500
+    assert comment.agree_num == 220000
 
 
 def test_extract_search_note_list_from_api_accepts_w_format():
