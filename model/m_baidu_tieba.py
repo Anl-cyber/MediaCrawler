@@ -19,9 +19,46 @@
 
 
 # -*- coding: utf-8 -*-
+import re
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+
+def parse_reply_count(value) -> int:
+    """把贴吧回复数/页数的各种显示格式容错转成 int。
+
+    贴吧页面 DOM 与接口中回复数可能显示为 "22W"（万）、"1.2W"、"3.5K"、"1.2万"
+    等缩写格式（实测 DOM 与搜索 API 均会出现）。TiebaNote.total_replay_num 声明为
+    int，直接传 "22W" 会让 pydantic 校验失败 → ValidationError → 整页解析中断
+    （2026-08-02 实测：BaiduTieBaCrawler.search 整页 0 条）。本函数在塞进模型前
+    统一转换：22W→220000、1.2W→12000、3.5K→3500、1.2万→12000。
+    """
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if value is None:
+        return 0
+    s = str(value).strip().replace(",", "").replace("，", "")
+    if not s:
+        return 0
+    mult = 1
+    upper = s.upper()
+    if upper.endswith("W") or upper.endswith("万"):
+        mult = 10000
+        s = s[:-1]
+    elif upper.endswith("K"):
+        mult = 1000
+        s = s[:-1]
+    s = s.strip()
+    try:
+        return int(float(s) * mult)
+    except (TypeError, ValueError):
+        m = re.search(r"\d+", s)
+        return int(m.group(0)) if m else 0
 
 
 class TiebaNote(BaseModel):
@@ -46,6 +83,14 @@ class TiebaNote(BaseModel):
     agree_num: int = Field(default=0, description="Agree/Like count")
     forum_first_class: str = Field(default="", description="Forum first-level category")
     forum_second_class: str = Field(default="", description="Forum second-level category")
+
+    # Bug2 修复：贴吧回复数/页数可能以 "22W"/"1.2W"/"3.5K" 等缩写格式出现（DOM 与
+    # 搜索 API 均实测出现），模型构造时统一容错转换，防止 ValidationError 中断整页解析。
+    # 必须用 mode="before"：int 字段的 core 校验会在 after validator 之前失败，拦截不到。
+    @field_validator("total_replay_num", "total_replay_page", mode="before")
+    @classmethod
+    def _validate_reply_count(cls, v):
+        return parse_reply_count(v)
 
 
 class TiebaComment(BaseModel):

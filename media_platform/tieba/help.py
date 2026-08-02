@@ -28,7 +28,12 @@ from urllib.parse import parse_qs, quote, unquote, urljoin
 from parsel import Selector
 
 from constant import baidu_tieba as const
-from model.m_baidu_tieba import TiebaComment, TiebaCreator, TiebaNote
+from model.m_baidu_tieba import (
+    TiebaComment,
+    TiebaCreator,
+    TiebaNote,
+    parse_reply_count,
+)
 from tools import utils
 from tools.user_hash import anonymize_user_id, mask_nickname
 
@@ -148,7 +153,7 @@ class TieBaExtractor:
                 user_nickname=mask_nickname(user.get("show_nickname") or user.get("user_name") or ""),
                 tieba_name=tieba_name,
                 tieba_link=self._tieba_link_from_name(tieba_name),
-                total_replay_num=item.get("post_num") or 0,
+                total_replay_num=parse_reply_count(item.get("post_num")),
             )
             result.append(tieba_note)
         return result
@@ -181,8 +186,8 @@ class TieBaExtractor:
             user_nickname=mask_nickname(author.get("name_show") or author.get("name") or ""),
             tieba_name=tieba_name,
             tieba_link=self._tieba_link_from_name(tieba_name),
-            total_replay_num=thread.get("reply_num") or 0,
-            total_replay_page=page.get("total_page") or 0,
+            total_replay_num=parse_reply_count(thread.get("reply_num")),
+            total_replay_page=parse_reply_count(page.get("total_page")),
         )
         return note
 
@@ -490,7 +495,7 @@ class TieBaExtractor:
                 user_nickname=mask_nickname(user_nickname),
                 tieba_name=tieba_name,
                 tieba_link=tieba_link,
-                total_replay_num=post_field_value.get("reply_num", 0),
+                total_replay_num=parse_reply_count(post_field_value.get("reply_num")),
             )
             result.append(tieba_note)
         return result
@@ -544,12 +549,12 @@ class TieBaExtractor:
             tieba_name=tieba_name,
             tieba_link=tieba_link,
             publish_time=publish_time,
-            total_replay_num=(
-                thread_num_infos[0].xpath("./text()").get(default="0").strip()
+            total_replay_num=parse_reply_count(
+                thread_num_infos[0].xpath("./text()").get(default="0")
                 if len(thread_num_infos) > 0 else 0
             ),
-            total_replay_page=(
-                thread_num_infos[1].xpath("./text()").get(default="0").strip()
+            total_replay_page=parse_reply_count(
+                thread_num_infos[1].xpath("./text()").get(default="0")
                 if len(thread_num_infos) > 1 else 0
             ),
         )

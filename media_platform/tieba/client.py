@@ -30,7 +30,12 @@ from tenacity import RetryError, retry, stop_after_attempt, wait_fixed
 
 import config
 from base.base_crawler import AbstractApiClient
-from model.m_baidu_tieba import TiebaComment, TiebaCreator, TiebaNote
+from model.m_baidu_tieba import (
+    TiebaComment,
+    TiebaCreator,
+    TiebaNote,
+    parse_reply_count,
+)
 from proxy.proxy_ip_pool import ProxyIpPool
 from tools import utils
 from tools.user_hash import anonymize_user_id
@@ -603,7 +608,7 @@ class BaiduTieBaClient(AbstractApiClient):
                 note_detail.publish_time = utils.get_time_str_from_unix_time(
                     thread.get("create_time") or thread.get("first_post_time") or 0
                 )
-                note_detail.total_replay_num = thread.get("reply_num") or 0
+                note_detail.total_replay_num = parse_reply_count(thread.get("reply_num"))
                 note_detail.total_replay_page = full_data.get("page", {}).get("total_page") or 1
                 
                 fname = forum.get("name") or ""
@@ -645,7 +650,7 @@ class BaiduTieBaClient(AbstractApiClient):
                 note_detail.tieba_name = fname + "吧" if not fname.endswith("吧") else fname
                 note_detail.tieba_link = f"https://tieba.baidu.com/f?kw={fname}"
             if dom.get("reply_count") and not note_detail.total_replay_num:
-                note_detail.total_replay_num = int(dom["reply_count"])
+                note_detail.total_replay_num = parse_reply_count(dom["reply_count"])
             
             # Parse data-field JSON for structured data (more precise)
             fp = dom.get("first_post_data")
@@ -855,7 +860,7 @@ class BaiduTieBaClient(AbstractApiClient):
                 # Update note_detail with thread-level data from page_pc API
                 thread = api_data.get("thread") or {}
                 if not note_detail.total_replay_num and thread.get("reply_num"):
-                    note_detail.total_replay_num = thread["reply_num"]
+                    note_detail.total_replay_num = parse_reply_count(thread["reply_num"])
                 if not note_detail.total_replay_page and page_info.get("total_page"):
                     note_detail.total_replay_page = page_info["total_page"]
                 if thread.get("create_time") and not note_detail.create_time_unix:

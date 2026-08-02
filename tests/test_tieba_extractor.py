@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from media_platform.tieba.help import TieBaExtractor
-from model.m_baidu_tieba import TiebaComment
+from model.m_baidu_tieba import TiebaComment, TiebaNote, parse_reply_count
 
 
 FIXTURE_DIR = Path(__file__).parent.parent / "media_platform" / "tieba" / "test_data"
@@ -11,6 +11,88 @@ FIXTURE_DIR = Path(__file__).parent.parent / "media_platform" / "tieba" / "test_
 
 def read_fixture(name: str) -> str:
     return (FIXTURE_DIR / name).read_text(encoding="utf-8")
+
+
+# ── Bug2 回归：贴吧回复数 "22W"/"1.2W"/"3.5K" 缩写格式容错解析 ──
+def test_parse_reply_count_formats():
+    assert parse_reply_count("22W") == 220000
+    assert parse_reply_count("1.2W") == 12000
+    assert parse_reply_count("3.5K") == 3500
+    assert parse_reply_count("1.2万") == 12000
+    assert parse_reply_count("22万") == 220000
+    assert parse_reply_count("12345") == 12345
+    assert parse_reply_count(19) == 19
+    assert parse_reply_count(None) == 0
+    assert parse_reply_count("") == 0
+    assert parse_reply_count("回复(37)") == 37
+    assert parse_reply_count("1,234") == 1234
+
+
+def test_tieba_note_model_accepts_w_format_reply_count():
+    # 模型构造时容错：total_replay_num="22W" 不再抛 pydantic ValidationError
+    note = TiebaNote(
+        note_id="10559655942",
+        title="测试",
+        note_url="https://tieba.baidu.com/p/10559655942",
+        tieba_name="诸城吧",
+        tieba_link="https://tieba.baidu.com/f?kw=%E8%AF%B8%E5%9F%8E",
+        total_replay_num="22W",
+    )
+    assert note.total_replay_num == 220000
+
+
+def test_extract_search_note_list_from_api_accepts_w_format():
+    # Bug2 实测路径：搜索 API post_num="22W" → 之前整页 ValidationError → 0 条
+    api_data = {
+        "data": {
+            "card_list": [
+                {
+                    "cardInfo": "thread",
+                    "cardStyle": "thread",
+                    "data": {
+                        "tid": "10559655942",
+                        "title": "数，英，编程老师",
+                        "content": "培训班需求",
+                        "time": 1773552643,
+                        "user": {"show_nickname": "754023117", "portrait": "x"},
+                        "post_num": "22W",
+                        "forum_name": "诸城",
+                    },
+                },
+                {
+                    "cardInfo": "thread",
+                    "cardStyle": "thread",
+                    "data": {
+                        "tid": "10559655943",
+                        "title": "另一个帖子",
+                        "content": "内容",
+                        "time": 1773552644,
+                        "user": {"show_nickname": "a", "portrait": "y"},
+                        "post_num": "1.2W",
+                        "forum_name": "诸城",
+                    },
+                },
+            ]
+        },
+    }
+    notes = TieBaExtractor().extract_search_note_list_from_api(api_data)
+    assert len(notes) == 2
+    assert notes[0].total_replay_num == 220000
+    assert notes[1].total_replay_num == 12000
+
+
+def test_extract_note_detail_dom_accepts_w_format():
+    # DOM 路径：<span class="red">22W</span> 回复贴 → total_replay_num 容错为 220000
+    page_content = """
+    <html><body>
+      <div id="thread_theme_5">
+        <li class="l_reply_num"><span class="red">22W</span>回复贴，共<span class="red">1100</span>页</li>
+      </div>
+    </body></html>
+    """
+    note = TieBaExtractor().extract_note_detail(page_content)
+    assert note.total_replay_num == 220000
+    assert note.total_replay_page == 1100
 
 
 def test_extract_search_note_list_from_keyword_page():
