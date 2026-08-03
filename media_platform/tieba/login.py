@@ -63,6 +63,90 @@ class BaiduTieBaLogin(AbstractLogin):
             return True
         return False
 
+    async def _quick_login_state(self) -> bool:
+        """不带重试的一次性登录态检查（check_login_state 带 600 次重试装饰器，不能直接复用做快速判断）"""
+        current_cookie = await self.browser_context.cookies()
+        _, cookie_dict = utils.convert_cookies(current_cookie)
+        return bool(cookie_dict.get("STOKEN") or cookie_dict.get("PTOKEN"))
+
+    async def _is_captcha_page(self) -> bool:
+        """检测当前页面是否处于百度安全验证页（滑块验证）。
+
+        2026-08-03 贴吧登录加固：自动登录点击按钮时可能被百度安全验证页拦截，
+        原实现 30s locator 超时直接崩溃。此方法识别验证页，让上层转入人工等待。
+        """
+        try:
+            title = await self.context_page.title()
+            if title and ("安全验证" in title or "captcha" in title.lower()):
+                return True
+            content = await self.context_page.content()
+            if "拖动滑块完成验证" in content or "百度安全验证" in content:
+                return True
+            if "captcha" in content[:3000].lower():
+                return True
+        except Exception:
+            # 页面跳转/加载中读取失败，保守视为非验证页，让上层按原逻辑重试
+            pass
+        return False
+
+    async def _wait_human_captcha(self, timeout_seconds: int = 180) -> bool:
+        """检测到百度安全验证页时，提示用户在浏览器中手动完成滑块，轮询等待通过。
+
+        Args:
+            timeout_seconds: 最长等待秒数，默认 180s（与 core.py 的 _CAPTCHA_WAIT_SEC 对齐）
+
+        Returns:
+            True: 验证页已消失（用户完成滑块）
+            False: 等待超时，验证页仍存在
+        """
+        import time as _time
+        utils.logger.warning(
+            "[BaiduTieBaLogin] 检测到百度安全验证页，请在弹出的浏览器窗口中手动完成滑块验证，"
+            f"等待最长 {timeout_seconds}s ..."
+        )
+        start = _time.time()
+        while _time.time() - start < timeout_seconds:
+            await asyncio.sleep(2)
+            if not await self._is_captcha_page():
+                utils.logger.info("[BaiduTieBaLogin] 百度安全验证已通过，继续登录流程 ...")
+                return True
+        utils.logger.warning("[BaiduTieBaLogin] 等待人工滑块验证超时，登录流程退出 ...")
+        return False
+
+    async def _click_login_button_with_captcha(self) -> bool:
+        """点击登录按钮，遇到百度安全验证页（滑块）时转入人工等待。
+
+        2026-08-03 贴吧登录加固：原实现点击登录按钮 30s 超时直接崩溃，
+        对滑块验证无感知。改造后：
+        - 点击前先检测验证页，命中则直接提示人工处理
+        - 点击超时/异常后复查是否转入验证页，命中则提示人工处理
+        - 人工完成滑块且登录态已就绪 → 返回 True（调用方跳过扫码）
+        - 正常点击成功 → 返回 False（调用方继续找二维码）
+
+        Returns:
+            True: 人工处理完成且已登录（跳过扫码）
+            False: 正常点击路径，继续原扫码流程
+        """
+        if await self._is_captcha_page():
+            if not await self._wait_human_captcha():
+                sys.exit("[BaiduTieBaLogin] 滑块验证等待超时，退出")
+            return await self._quick_login_state()
+        login_button_ele = self.context_page.locator("xpath=//li[@class='u_login']")
+        try:
+            await login_button_ele.click(timeout=30000)
+        except Exception as exc:
+            # 点击过程/点击后页面可能转入安全验证页（滑块），转为人工等待而不是崩溃
+            utils.logger.warning(
+                f"[BaiduTieBaLogin._click_login_button_with_captcha] 点击登录按钮异常: {exc}，"
+                "检查是否触发安全验证页 ..."
+            )
+            if await self._is_captcha_page():
+                if not await self._wait_human_captcha():
+                    sys.exit("[BaiduTieBaLogin] 滑块验证等待超时，退出")
+                return await self._quick_login_state()
+            raise
+        return False
+
     async def begin(self):
         """Start login baidutieba"""
         utils.logger.info("[BaiduTieBaLogin.begin] Begin login baidutieba ...")
@@ -91,9 +175,14 @@ class BaiduTieBaLogin(AbstractLogin):
         if not base64_qrcode_img:
             utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
             # if this website does not automatically popup login dialog box, we will manual click login button
+            # 2026-08-03 贴吧登录加固：百度安全验证页（滑块）会拦截登录按钮点击，
+            # 原实现 locator 30s 超时直接崩溃；改为先识别验证页 → 提示人工处理 → 轮询等待
             await asyncio.sleep(0.5)
-            login_button_ele = self.context_page.locator("xpath=//li[@class='u_login']")
-            await login_button_ele.click()
+            if await self._click_login_button_with_captcha():
+                # 人工完成滑块后可能已直接登录，跳过后续扫码
+                utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] 滑块验证后已登录，跳过扫码 ...")
+                await asyncio.sleep(5)
+                return
             base64_qrcode_img = await utils.find_login_qrcode(
                 self.context_page,
                 selector=qrcode_img_selector
