@@ -40,10 +40,17 @@ from tools import utils
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
-from .client import BaiduTieBaClient
+from .client import BaiduTieBaClient, TiebaCaptchaError
 from .field import SearchNoteType, SearchSortType
 from .help import TieBaExtractor
 from .login import BaiduTieBaLogin
+
+
+# 2026-08-03 贴吧反爬加固：验证页拦截后的等待/重试策略——
+# 等待时长给用户手动完成验证留出窗口（CDP 非 headless），
+# 超过最大重试次数则放弃当前关键词（数据保留，调度器下轮再试）。
+_CAPTCHA_WAIT_SEC = 60
+_CAPTCHA_MAX_RETRY = 3
 
 
 class TieBaCrawler(AbstractCrawler):
@@ -202,11 +209,65 @@ class TieBaCrawler(AbstractCrawler):
                     utils.logger.info(f"[TieBaCrawler.search] Sleeping for {config.CRAWLER_MAX_SLEEP_SEC} seconds after page {page}")
 
                     page += 1
+                except TiebaCaptchaError as ce:
+                    # 2026-08-03 贴吧反爬加固：验证页拦截不再是"直接 break 放弃
+                    # 关键词"——等待用户手动完成验证（CDP 非 headless）、重建
+                    # 页面对象（会话可能已被风控踢掉）后重试当前页。
+                    if not await self._retry_search_after_captcha(
+                        keyword=keyword, page=page,
+                        page_size=tieba_limit_count, captcha_err=ce,
+                    ):
+                        break
                 except Exception as ex:
                     utils.logger.error(
                         f"[BaiduTieBaCrawler.search] Search keywords error, current page: {page}, current keyword: {keyword}, err: {ex}"
                     )
                     break
+
+    async def _retry_search_after_captcha(
+        self,
+        keyword: str,
+        page: int,
+        page_size: int,
+        captcha_err: Exception,
+    ) -> bool:
+        """2026-08-03 贴吧反爬加固：验证页拦截后的恢复流程。
+
+        每轮：提示用户在 CDP 浏览器手动完成验证 → 等待 _CAPTCHA_WAIT_SEC →
+        重建页面对象（会话可能已被风控踢掉）→ 重试当前页搜索。
+        返回 True = 重试成功（调用方继续主循环）；False = 放弃（调用方 break）。
+        """
+        for attempt in range(1, _CAPTCHA_MAX_RETRY + 1):
+            utils.logger.warning(
+                f"[TieBaCrawler] 第 {attempt}/{_CAPTCHA_MAX_RETRY} 次遭遇百度安全验证，"
+                f"等待 {_CAPTCHA_WAIT_SEC}s——请在 CDP 浏览器中手动完成验证。"
+                f"(keyword={keyword}, page={page}, err={str(captcha_err)[:200]})"
+            )
+            await asyncio.sleep(_CAPTCHA_WAIT_SEC)
+            try:
+                await self._rebuild_context_page()
+                notes_list = await self.tieba_client.get_notes_by_keyword(
+                    keyword=keyword, page=page, page_size=page_size,
+                    sort=SearchSortType.TIME_DESC,
+                    note_type=SearchNoteType.FIXED_THREAD,
+                )
+                if not notes_list:
+                    utils.logger.info(
+                        f"[TieBaCrawler] 验证恢复后搜索列表为空（keyword={keyword}, page={page}）")
+                    return False
+                await self.get_specified_notes(
+                    note_id_list=[n.note_id for n in notes_list])
+                return True
+            except TiebaCaptchaError:
+                utils.logger.warning("[TieBaCrawler] 验证恢复后仍被拦截，继续等待重试...")
+                continue
+            except Exception as ex:
+                utils.logger.error(
+                    f"[TieBaCrawler] 验证恢复后重试失败，放弃当前页: {ex}")
+                return False
+        utils.logger.error(
+            f"[TieBaCrawler] 连续 {_CAPTCHA_MAX_RETRY} 次验证页拦截，放弃关键词 {keyword}")
+        return False
 
     async def get_specified_tieba_notes(self):
         """
@@ -544,6 +605,26 @@ class TieBaCrawler(AbstractCrawler):
 
         await self.browser_context.add_init_script(anti_detection_js)
         utils.logger.info("[TieBaCrawler] Anti-detection scripts injected")
+
+    async def _rebuild_context_page(self) -> None:
+        """2026-08-03 贴吧反爬加固：重建页面对象并重新绑定客户端。
+
+        场景：CDP 会话被百度风控踢掉（MediaCrawler#857）/页面 crash 后，
+        Playwright 页面对象不可恢复，必须 new_page 重建；防检测脚本经
+        add_init_script 绑定在 context 上（新页面自动继承），但"经百度
+        首页进贴吧"的绕验证导航需重走，且 client 的 playwright_page 引用
+        必须同步指向新页面。
+        """
+        utils.logger.warning("[TieBaCrawler] 重建页面对象（CDP 会话被踢/页面失效）...")
+        try:
+            await self.context_page.close()
+        except Exception:
+            pass
+        self.context_page = await self.browser_context.new_page()
+        await self._navigate_to_tieba_via_baidu()
+        if self.tieba_client is not None:
+            self.tieba_client.playwright_page = self.context_page
+        utils.logger.info("[TieBaCrawler] 页面重建完成")
 
     async def create_tieba_client(
         self, httpx_proxy: Optional[str], ip_pool: Optional[ProxyIpPool] = None

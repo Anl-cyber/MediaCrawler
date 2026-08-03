@@ -46,6 +46,15 @@ from .help import TieBaExtractor
 PC_SIGN_SECRET = os.getenv("TIEBA_SIGN_SECRET", "")
 
 
+class TiebaCaptchaError(Exception):
+    """百度安全验证页拦截（2026-08-03 贴吧反爬加固）。
+
+    区别于通用解析错误：上层（core 主循环）捕获后应等待用户手动完成
+    验证（CDP 非 headless 模式）、重建页面对象并重试当前页，而不是
+    当作普通失败 break 放弃整个关键词。
+    """
+
+
 class BaiduTieBaClient(AbstractApiClient):
 
     def __init__(
@@ -151,6 +160,13 @@ class BaiduTieBaClient(AbstractApiClient):
         )
         if response["status"] != 200:
             raise Exception(f"Tieba PC API failed, status={response['status']}, url={url}")
+        # 2026-08-03 贴吧反爬加固：百度安全验证页会以 200 返回 HTML，
+        # 原实现把它当 JSON 解析错误（误导为"接口挂了"）。先识别验证页，
+        # 抛出 TiebaCaptchaError 让上层等待/重试/重建页面。
+        if "百度安全验证" in response["text"] or "安全验证" in response["text"][:2000]:
+            raise TiebaCaptchaError(
+                f"Tieba 返回百度安全验证页（搜索 API），url={url}，"
+                f"body={response['text'][:300]}")
         try:
             json_data = json.loads(response["text"])
         except json.JSONDecodeError as exc:
@@ -477,6 +493,12 @@ class BaiduTieBaClient(AbstractApiClient):
                 await self.playwright_page.goto(post_url, wait_until="domcontentloaded", timeout=15000)
                 await asyncio.sleep(3)
                 page_html = await self.playwright_page.content()
+                # 2026-08-03 贴吧反爬加固：重试后仍被验证页拦截 → 明确异常
+                # （原实现静默继续解析验证页 DOM，产出空/垃圾 note 且无法区分根因）
+                if "百度安全验证" in page_html or "captcha" in page_html.lower():
+                    raise TiebaCaptchaError(
+                        f"Tieba 详情页被百度安全验证持续拦截，note_id={note_id}，"
+                        f"请在 CDP 浏览器中手动完成验证后重试")
 
             # Extract from page's embedded JS data first, fallback to DOM selectors
             note_detail = await self._extract_note_from_page(note_id, page_html)
